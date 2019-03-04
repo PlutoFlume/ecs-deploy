@@ -7,9 +7,10 @@ from dateutil.tz.tz import tzlocal
 
 class EcsClient(object):
     def __init__(self, access_key_id=None, secret_access_key=None,
-                 region=None, profile=None):
+                 region=None, profile=None, session_token=None):
         session = Session(aws_access_key_id=access_key_id,
                           aws_secret_access_key=secret_access_key,
+                          aws_session_token=session_token,
                           region_name=region,
                           profile_name=profile)
         self.boto = session.client(u'ecs')
@@ -56,6 +57,12 @@ class EcsClient(object):
         )
 
     def update_service(self, cluster, service, desired_count, task_definition):
+        if desired_count is None:
+            return self.boto.update_service(
+                cluster=cluster,
+                service=service,
+                taskDefinition=task_definition
+            )
         return self.boto.update_service(
             cluster=cluster,
             service=service,
@@ -88,9 +95,6 @@ class EcsService(dict):
     def __init__(self, cluster, service_definition=None, **kwargs):
         self._cluster = cluster
         super(EcsService, self).__init__(service_definition, **kwargs)
-
-    def set_desired_count(self, desired_count):
-        self[u'desiredCount'] = desired_count
 
     def set_task_definition(self, task_definition):
         self[u'taskDefinition'] = task_definition.arn
@@ -194,6 +198,8 @@ class EcsTaskDefinition(object):
                 override['command'] = self.get_overrides_command(diff.value)
             elif diff.field == 'environment':
                 override['environment'] = self.get_overrides_env(diff.value)
+            elif diff.field == 'secrets':
+                override['secrets'] = self.get_overrides_secrets(diff.value)
         return overrides
 
     @staticmethod
@@ -203,6 +209,10 @@ class EcsTaskDefinition(object):
     @staticmethod
     def get_overrides_env(env):
         return [{"name": e, "value": env[e]} for e in env]
+
+    @staticmethod
+    def get_overrides_secrets(secrets):
+        return [{"name": s, "valueFrom": secrets[s]} for s in secrets]
 
     def set_images(self, tag=None, **images):
         self.validate_container_options(**images)
@@ -241,9 +251,9 @@ class EcsTaskDefinition(object):
                     old_value=container.get(u'command')
                 )
                 self._diff.append(diff)
-                container[u'command'] = [new_command]
+                container[u'command'] = new_command.split(" ")
 
-    def set_environment(self, environment_list):
+    def set_environment(self, environment_list, exclusive=False):
         environment = {}
 
         for env in environment_list:
@@ -255,14 +265,25 @@ class EcsTaskDefinition(object):
             if container[u'name'] in environment:
                 self.apply_container_environment(
                     container=container,
-                    new_environment=environment[container[u'name']]
+                    new_environment=environment[container[u'name']],
+                    exclusive=exclusive,
+                )
+            elif exclusive is True:
+                self.apply_container_environment(
+                    container=container,
+                    new_environment={},
+                    exclusive=exclusive,
                 )
 
-    def apply_container_environment(self, container, new_environment):
+    def apply_container_environment(self, container, new_environment, exclusive=False):
         environment = container.get('environment', {})
         old_environment = {env['name']: env['value'] for env in environment}
-        merged = old_environment.copy()
-        merged.update(new_environment)
+
+        if exclusive is True:
+            merged = new_environment
+        else:
+            merged = old_environment.copy()
+            merged.update(new_environment)
 
         if old_environment == merged:
             return
@@ -277,6 +298,53 @@ class EcsTaskDefinition(object):
 
         container[u'environment'] = [
             {"name": e, "value": merged[e]} for e in merged
+        ]
+
+    def set_secrets(self, secrets_list, exclusive=False):
+        secrets = {}
+
+        for secret in secrets_list:
+            secrets.setdefault(secret[0], {})
+            secrets[secret[0]][secret[1]] = secret[2]
+
+        self.validate_container_options(**secrets)
+        for container in self.containers:
+            if container[u'name'] in secrets:
+                self.apply_container_secrets(
+                    container=container,
+                    new_secrets=secrets[container[u'name']],
+                    exclusive=exclusive,
+                )
+            elif exclusive is True:
+                self.apply_container_secrets(
+                    container=container,
+                    new_secrets={},
+                    exclusive=exclusive,
+                )
+
+    def apply_container_secrets(self, container, new_secrets, exclusive=False):
+        secrets = container.get('secrets', {})
+        old_secrets = {secret['name']: secret['valueFrom'] for secret in secrets}
+
+        if exclusive is True:
+            merged = new_secrets
+        else:
+            merged = old_secrets.copy()
+            merged.update(new_secrets)
+
+        if old_secrets == merged:
+            return
+
+        diff = EcsTaskDefinitionDiff(
+            container=container[u'name'],
+            field=u'secrets',
+            value=merged,
+            old_value=old_secrets
+        )
+        self._diff.append(diff)
+
+        container[u'secrets'] = [
+            {"name": s, "valueFrom": merged[s]} for s in merged
         ]
 
     def validate_container_options(self, **container_options):
@@ -312,6 +380,12 @@ class EcsTaskDefinitionDiff(object):
                 self.value,
                 self.old_value,
             ))
+        elif self.field == u'secrets':
+            return '\n'.join(self._get_secrets_diffs(
+                self.container,
+                self.value,
+                self.old_value,
+            ))
         elif self.container:
             return u'Changed %s of container "%s" to: "%s" (was: "%s")' % (
                 self.field,
@@ -329,11 +403,32 @@ class EcsTaskDefinitionDiff(object):
     @staticmethod
     def _get_environment_diffs(container, env, old_env):
         msg = u'Changed environment "%s" of container "%s" to: "%s"'
+        msg_removed = u'Removed environment "%s" of container "%s"'
         diffs = []
         for name, value in env.items():
             old_value = old_env.get(name)
+            if value != old_value or value and not old_value:
+                message = msg % (name, container, value)
+                diffs.append(message)
+        for old_name in old_env.keys():
+            if old_name not in env.keys():
+                message = msg_removed % (old_name, container)
+                diffs.append(message)
+        return diffs
+
+    @staticmethod
+    def _get_secrets_diffs(container, secrets, old_secrets):
+        msg = u'Changed secret "%s" of container "%s" to: "%s"'
+        msg_removed = u'Removed secret "%s" of container "%s"'
+        diffs = []
+        for name, value in secrets.items():
+            old_value = old_secrets.get(name)
             if value != old_value or not old_value:
                 message = msg % (name, container, value)
+                diffs.append(message)
+        for old_name in old_secrets.keys():
+            if old_name not in secrets.keys():
+                message = msg_removed % (old_name, container)
                 diffs.append(message)
         return diffs
 
@@ -397,11 +492,11 @@ class EcsAction(object):
     def deregister_task_definition(self, task_definition):
         self._client.deregister_task_definition(task_definition.arn)
 
-    def update_service(self, service):
+    def update_service(self, service, desired_count=None):
         response = self._client.update_service(
             cluster=service.cluster,
             service=service.name,
-            desired_count=service.desired_count,
+            desired_count=desired_count,
             task_definition=service.task_definition
         )
         return EcsService(self._cluster_name, response[u'service'])
@@ -463,8 +558,7 @@ class DeployAction(EcsAction):
 class ScaleAction(EcsAction):
     def scale(self, desired_count):
         try:
-            self._service.set_desired_count(desired_count)
-            return self.update_service(self._service)
+            return self.update_service(self._service, desired_count)
         except ClientError as e:
             raise EcsError(str(e))
 
