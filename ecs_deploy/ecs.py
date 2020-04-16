@@ -63,6 +63,13 @@ class EcsClient(object):
             taskDefinition=task_definition
         )
 
+    def update_daemon_service(self, cluster, service, task_definition):
+        return self.boto.update_service(
+            cluster=cluster,
+            service=service,
+            taskDefinition=task_definition
+        )
+
     def run_task(self, cluster, task_definition, count, started_by, overrides):
         return self.boto.run_task(
             cluster=cluster,
@@ -344,6 +351,7 @@ class EcsAction(object):
         try:
             if service_name:
                 self._service = self.get_service()
+                self._scheduling_strategy = self.get_scheduling_strategy()
         except IndexError:
             raise EcsConnectionError(
                 u'An error occurred when calling the DescribeServices '
@@ -356,15 +364,19 @@ class EcsAction(object):
                 u'Unable to locate credentials. Configure credentials '
                 u'by running "aws configure".'
             )
+    def get_scheduling_strategy(self):
+        scheduling_strategy = self._service.get("schedulingStrategy")
+        return scheduling_strategy
 
     def get_service(self):
         services_definition = self._client.describe_services(
             cluster_name=self._cluster_name,
             service_name=self._service_name
         )
+
         return EcsService(
             cluster=self._cluster_name,
-            service_definition=services_definition[u'services'][0]
+            service_definition=services_definition[u'services'][0],
         )
 
     def get_current_task_definition(self, service):
@@ -399,6 +411,14 @@ class EcsAction(object):
             cluster=service.cluster,
             service=service.name,
             desired_count=service.desired_count,
+            task_definition=service.task_definition
+        )
+        return EcsService(self._cluster_name, response[u'service'])
+
+    def update_daemon_service(self, service):
+        response = self._client.update_daemon_service(
+            cluster=service.cluster,
+            service=service.name,
             task_definition=service.task_definition
         )
         return EcsService(self._cluster_name, response[u'service'])
@@ -450,11 +470,19 @@ class EcsAction(object):
 
 class DeployAction(EcsAction):
     def deploy(self, task_definition):
-        try:
-            self._service.set_task_definition(task_definition)
-            return self.update_service(self._service)
-        except ClientError as e:
-            raise EcsError(str(e))
+        if self._scheduling_strategy == "DAEMON":
+            try:
+                self._service.set_task_definition(task_definition)
+                return self.update_daemon_service(self._service)
+            except ClientError as e:
+                raise EcsError(str(e))
+        else:
+            try:
+                self._service.set_task_definition(task_definition)
+                return self.update_service(self._service)
+            except ClientError as e:
+                raise EcsError(str(e))
+
 
 
 class ScaleAction(EcsAction):

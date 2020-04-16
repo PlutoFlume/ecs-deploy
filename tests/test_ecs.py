@@ -18,6 +18,7 @@ CLUSTER_ARN = u'arn:aws:ecs:eu-central-1:123456789012:cluster/%s' % CLUSTER_NAME
 SERVICE_NAME = u'test-service'
 SERVICE_ARN = u'ecs-svc/12345678901234567890'
 DESIRED_COUNT = 2
+SCHEDULING_STRATEGY = "DAEMON"
 TASK_DEFINITION_FAMILY_1 = u'test-task'
 TASK_DEFINITION_REVISION_1 = 1
 TASK_DEFINITION_ROLE_ARN_1 = u'arn:test:role:1'
@@ -127,6 +128,15 @@ PAYLOAD_SERVICE = {
     u'events': []
 }
 
+PAYLOAD_SERVICE_WITH_STRATEGY = {
+    u'serviceName': SERVICE_NAME,
+    u'desiredCount': DESIRED_COUNT,
+    u'taskDefinition': TASK_DEFINITION_ARN_1,
+    u'deployments': PAYLOAD_DEPLOYMENTS,
+    u'events': [],
+    u'schedulingStrategy': SCHEDULING_STRATEGY
+}
+
 PAYLOAD_SERVICE_WITH_ERRORS = {
     u'serviceName': SERVICE_NAME,
     u'desiredCount': DESIRED_COUNT,
@@ -202,6 +212,9 @@ def task_definition_revision_2():
 def service():
     return EcsService(CLUSTER_NAME, deepcopy(PAYLOAD_SERVICE))
 
+@pytest.fixture
+def service_with_strategy():
+    return EcsService(CLUSTER_NAME, deepcopy(PAYLOAD_SERVICE_WITH_STRATEGY))
 
 @pytest.fixture
 def service_with_errors():
@@ -495,6 +508,14 @@ def test_client_update_service(client):
         taskDefinition=u'task-definition'
     )
 
+def test_client_update_daemon_service(client):
+    client.update_daemon_service(u'test-cluster', u'test-service', u'task-definition')
+    client.boto.update_service.assert_called_once_with(
+        cluster=u'test-cluster',
+        service=u'test-service',
+        taskDefinition=u'task-definition'
+    )
+
 
 def test_client_run_task(client):
     client.run_task(
@@ -615,6 +636,19 @@ def test_update_service(client, service):
         task_definition=service.task_definition
     )
 
+@patch.object(EcsClient, '__init__')
+def test_update_daemon_service(client, service):
+    client.update_daemon_service.return_value = RESPONSE_SERVICE
+
+    action = EcsAction(client, CLUSTER_NAME, SERVICE_NAME)
+    new_service = action.update_daemon_service(service)
+
+    assert isinstance(new_service, EcsService)
+    client.update_daemon_service.assert_called_once_with(
+        cluster=service.cluster,
+        service=service.name,
+        task_definition=service.task_definition
+    )
 
 @patch.object(EcsClient, '__init__')
 def test_is_deployed(client, service):
@@ -694,6 +728,11 @@ def test_deploy_action(client, task_definition_revision_2):
         cluster=action.service.cluster,
         service=action.service.name,
         desired_count=action.service.desired_count,
+        task_definition=task_definition_revision_2.arn
+    )
+    client.update_daemon_service.assert_called_once_with(
+        cluster=action.service.cluster,
+        service=action.service.name,
         task_definition=task_definition_revision_2.arn
     )
 
@@ -790,6 +829,14 @@ class EcsTestClient(object):
 
     def deregister_task_definition(self, task_definition_arn):
         return deepcopy(RESPONSE_TASK_DEFINITION)
+
+    def update_daemon_service(self, cluster, service, task_definition):
+        if self.client_errors:
+            error = dict(Error=dict(Code=123, Message="Something went wrong"))
+            raise ClientError(error, 'fake_error')
+        if self.deployment_errors:
+            return deepcopy(RESPONSE_SERVICE_WITH_ERRORS)
+        return deepcopy(RESPONSE_SERVICE)
 
     def update_service(self, cluster, service, desired_count, task_definition):
         if self.client_errors:
