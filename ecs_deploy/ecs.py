@@ -116,6 +116,10 @@ class EcsService(dict):
         return self.get(u'desiredCount')
 
     @property
+    def scheduling_strategy(self):
+        return self.get(u'schedulingStrategy')
+
+    @property
     def deployment_created_at(self):
         for deployment in self.get(u'deployments'):
             if deployment.get(u'status') == u'PRIMARY':
@@ -351,22 +355,21 @@ class EcsAction(object):
         try:
             if service_name:
                 self._service = self.get_service()
-                self._scheduling_strategy = self.get_scheduling_strategy()
+
         except IndexError:
             raise EcsConnectionError(
                 u'An error occurred when calling the DescribeServices '
                 u'operation: Service not found.'
             )
+
         except ClientError as e:
             raise EcsConnectionError(str(e))
+
         except NoCredentialsError:
             raise EcsConnectionError(
                 u'Unable to locate credentials. Configure credentials '
                 u'by running "aws configure".'
             )
-    def get_scheduling_strategy(self):
-        scheduling_strategy = self._service.get("schedulingStrategy")
-        return scheduling_strategy
 
     def get_service(self):
         services_definition = self._client.describe_services(
@@ -470,19 +473,14 @@ class EcsAction(object):
 
 class DeployAction(EcsAction):
     def deploy(self, task_definition):
-        if self._scheduling_strategy == "DAEMON":
-            try:
-                self._service.set_task_definition(task_definition)
+        try:
+            self._service.set_task_definition(task_definition)
+            if self._service.scheduling_strategy == "DAEMON":
                 return self.update_daemon_service(self._service)
-            except ClientError as e:
-                raise EcsError(str(e))
-        else:
-            try:
-                self._service.set_task_definition(task_definition)
+            else:
                 return self.update_service(self._service)
-            except ClientError as e:
-                raise EcsError(str(e))
-
+        except ClientError as e:
+            raise EcsError(str(e))
 
 
 class ScaleAction(EcsAction):

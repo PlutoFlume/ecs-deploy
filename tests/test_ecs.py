@@ -212,9 +212,11 @@ def task_definition_revision_2():
 def service():
     return EcsService(CLUSTER_NAME, deepcopy(PAYLOAD_SERVICE))
 
+
 @pytest.fixture
 def service_with_strategy():
     return EcsService(CLUSTER_NAME, deepcopy(PAYLOAD_SERVICE_WITH_STRATEGY))
+
 
 @pytest.fixture
 def service_with_errors():
@@ -275,6 +277,10 @@ def test_service_errors(service_with_errors):
 
 def test_service_older_errors(service_with_errors):
     assert len(service_with_errors.older_errors) == 1
+
+
+def test_service_strategy(service_with_strategy):
+    assert service_with_strategy.scheduling_strategy == u'DAEMON'
 
 
 def test_task_family(task_definition):
@@ -730,6 +736,24 @@ def test_deploy_action(client, task_definition_revision_2):
         desired_count=action.service.desired_count,
         task_definition=task_definition_revision_2.arn
     )
+
+    client.update_daemon_service.assert_not_called()
+
+
+@patch.object(EcsClient, '__init__')
+def test_deploy_daemon_action(client, task_definition_revision_2):
+    action = DeployAction(client, CLUSTER_NAME, SERVICE_NAME)
+    action._service['schedulingStrategy'] = 'DAEMON'
+    updated_service = action.deploy(task_definition_revision_2)
+
+    assert action.service.task_definition == task_definition_revision_2.arn
+    assert isinstance(updated_service, EcsService)
+
+    client.describe_services.assert_called_once_with(
+        cluster_name=CLUSTER_NAME,
+        service_name=SERVICE_NAME
+    )
+    client.update_service.assert_not_called()
     client.update_daemon_service.assert_called_once_with(
         cluster=action.service.cluster,
         service=action.service.name,
