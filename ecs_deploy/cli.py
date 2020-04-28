@@ -61,6 +61,11 @@ def deploy(cluster, service, tag, image, command, env, role, task, region, acces
         client = get_client(access_key_id, secret_access_key, region, profile)
         deployment = DeployAction(client, cluster, service)
 
+        # Save task attached to service
+        live_td = get_task_definition(deployment, None)
+        click.secho("Current live task: %s" % live_td.revision)
+
+        # This gets the latest ACTIVE task
         td = get_task_definition(deployment, task)
         td.set_images(tag, **{key: value for (key, value) in image})
         td.set_commands(**{key: value for (key, value) in command})
@@ -88,7 +93,7 @@ def deploy(cluster, service, tag, image, command, env, role, task, region, acces
         except TaskPlacementError as e:
             if rollback:
                 click.secho('%s\n' % str(e), fg='red', err=True)
-                rollback_task_definition(deployment, td, new_td)
+                rollback_task_definition(deployment, live_td, new_td)
                 exit(1)
             else:
                 raise
